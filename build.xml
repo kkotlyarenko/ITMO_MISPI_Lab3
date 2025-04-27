@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="${project.name}" default="build" basedir=".">
+    <property file="build.properties"/>
+
+    <property name="svn.repo.dir.absolute" location="${svn.repo.dir}"/>
+
+    <path id="classpath">
+        <fileset dir="${lib.dir}" includes="**/*.jar"/>
+    </path>
+
+    <target name="resolve">
+        <mkdir dir="${lib.dir}"/>
+        <exec executable="mvn" failonerror="true">
+            <arg value="dependency:copy-dependencies"/>
+            <arg value="-DoutputDirectory=${lib.dir}"/>
+            <arg value="-DincludeScope=test"/>
+        </exec>
+    </target>
+
+    <target name="init" depends="resolve">
+        <mkdir dir="${classes.dir}"/>
+        <mkdir dir="${test.classes.dir}"/>
+        <mkdir dir="${dist.dir}"/>
+        <mkdir dir="${report.dir}"/>
+    </target>
+
+    <target name="clean">
+        <echo message="***** CLEAN STARTED *****"/>
+        <delete dir="${build.dir}"/>
+        <delete dir="${dist.dir}"/>
+        <delete dir="${report.dir}"/>
+        <delete dir="${lib.dir}"/>
+        <echo message="***** CLEAN COMPLETED *****"/>
+    </target>
+
+    <target name="clean-svn" description="Removes local SVN repository and working copy">
+        <echo message="***** CLEANING SVN ARTIFACTS *****"/>
+        <echo message="Deleting SVN working copy directory: ${svn.wc.dir}"/>
+        <delete dir="${svn.wc.dir}" quiet="true"/>
+
+        <echo message="Deleting local SVN repository directory: ${svn.repo.dir.absolute}"/>
+        <delete dir="${svn.repo.dir.absolute}" quiet="true"/>
+        <echo message="***** SVN CLEANUP COMPLETED *****"/>
+    </target>
+
+    <target name="clean-all" depends="clean, clean-svn">
+        <echo message="***** CLEAN ALL STARTED *****"/>
+        <antcall target="clean"/>
+        <antcall target="clean-svn"/>
+        <echo message="***** CLEAN ALL COMPLETED *****"/>
+    </target>
+
+    <target name="compile" depends="init">
+        <echo message="***** COMPILE MAIN *****"/>
+        <javac srcdir="${src.dir}" destdir="${classes.dir}" includeantruntime="false" classpathref="classpath"
+               source="${maven.compiler.source}" target="${maven.compiler.target}"
+               encoding="${project.build.sourceEncoding}"/>
+    </target>
+
+    <target name="build" depends="compile">
+        <echo message="***** BUILD WAR *****"/>
+        <war destfile="${dist.dir}/${project.name}-${version}.war" webxml="src/main/webapp/WEB-INF/web.xml">
+            <fileset dir="src/main/webapp"/>
+            <classes dir="${classes.dir}"/>
+            <lib dir="${lib.dir}">
+                <exclude name="jakarta.*"/>
+                <exclude name="junit*.*"/>
+                <exclude name="opentest4j*.*"/>
+                <exclude name="apiguardian*.*"/>
+            </lib>
+            <manifest>
+                <attribute name="Implementation-Version" value="${version}"/>
+                <attribute name="Implementation-Title" value="${project.name}"/>
+                <attribute name="Main-Class" value="${main.class}"/>
+                <attribute name="Built-By" value="${user.name}"/>
+            </manifest>
+        </war>
+    </target>
+
+    <target name="test" depends="build">
+        <echo message="***** COMPILE TESTS *****"/>
+        <mkdir dir="${test.classes.dir}"/>
+        <javac srcdir="${test.src.dir}" destdir="${test.classes.dir}" includeantruntime="false" encoding="UTF-8"
+               source="${maven.compiler.source}" target="${maven.compiler.target}">
+            <classpath>
+                <pathelement path="${classes.dir}"/>
+                <path refid="classpath"/>
+            </classpath>
+        </javac>
+
+        <echo message="***** RUN TESTS *****"/>
+        <mkdir dir="${report.dir}"/>
+        <java fork="true" failonerror="true" classname="org.junit.platform.console.ConsoleLauncher">
+            <classpath>
+                <pathelement path="${classes.dir}"/>
+                <pathelement path="${test.classes.dir}"/>
+                <fileset dir="${lib.dir}" includes="**/*.jar"/>
+            </classpath>
+            <arg value="--scan-classpath"/>
+            <arg value="--reports-dir=${report.dir}"/>
+        </java>
+    </target>
+
+    <target name="xml" description="Validates XML files">
+        <echo message="***** VALIDATING XML FILES *****"/>
+        <echo>XML project files validation...</echo>
+        <xmlvalidate lenient="true">
+            <fileset dir="./" includes="**/*.xml">
+                <exclude name=".idea/**"/>
+            </fileset>
+        </xmlvalidate>
+        <echo message="***** XML VALIDATION COMPLETED SUCCESSFULLY *****"/>
+    </target>
+
+    <target name="init-svn-repo" description="Creates the local SVN repository if it does not exist">
+        <available file="${svn.repo.dir.absolute}" type="dir" property="svn.repo.dir.exists"/>
+        <antcall target="do-create-svn-repo"/>
+    </target>
+
+    <target name="do-create-svn-repo" unless="svn.repo.dir.exists">
+        <echo message="Local SVN repository directory '${svn.repo.dir}' (at '${svn.repo.dir.absolute}') not found. Creating..."/>
+        <mkdir dir="${svn.repo.dir.absolute}/../"/>
+        <exec executable="svnadmin" failonerror="true">
+            <arg value="create"/>
+            <arg path="${svn.repo.dir.absolute}"/>
+        </exec>
+        <echo message="Local SVN repository created at '${svn.repo.dir.absolute}'."/>
+    </target>
+
+    <target name="init-svn-wc" depends="init-svn-repo" description="Checks out or updates the SVN working copy">
+        <pathconvert property="svn.repo.dir.absolute.clean" targetos="unix">
+            <path location="${svn.repo.dir.absolute}"/>
+        </pathconvert>
+        <property name="svn.repo.url.final" value="file://${svn.repo.dir.absolute.clean}"/>
+
+        <available file="${svn.wc.dir}/.svn" type="dir" property="svn.wc.is.valid"/>
+        <antcall target="do-checkout-svn-wc"/>
+    </target>
+
+    <target name="do-checkout-svn-wc" unless="svn.wc.is.valid">
+        <echo message="SVN working copy '${svn.wc.dir}' is not valid or does not exist. Checking out..."/>
+        <delete dir="${svn.wc.dir}" failonerror="false"/>
+        <mkdir dir="${svn.wc.dir}"/>
+        <exec executable="svn" failonerror="true">
+            <arg value="checkout"/>
+            <arg value="${svn.repo.url.final}"/>
+            <arg path="${svn.wc.dir}"/>
+        </exec>
+        <echo message="SVN working copy checked out to '${svn.wc.dir}'."/>
+    </target>
+
+    <target name="report" depends="test, init-svn-wc" description="Copies reports to SVN WC, adds and commits">
+        <echo message="***** SVN REPORTING STARTED *****"/>
+
+        <property name="svn.wc.reports.path" location="${svn.wc.dir}/${svn.reports.subdir}"/>
+
+        <echo message="Copying reports from '${report.dir}' to '${svn.wc.reports.path}'..."/>
+        <mkdir dir="${svn.wc.reports.path}"/>
+        <copy todir="${svn.wc.reports.path}" overwrite="true">
+            <fileset dir="${report.dir}" includes="**/*.xml"/>
+        </copy>
+
+        <echo message="Adding report files in '${svn.wc.reports.path}' to SVN..."/>
+        <exec executable="svn" failonerror="true" dir="${svn.wc.dir}">
+            <arg value="add"/>
+            <arg value="--force"/>
+            <arg value="--parents"/>
+            <arg path="${svn.wc.reports.path}"/>
+        </exec>
+
+        <echo message="Committing changes in '${svn.wc.reports.path}' to SVN..."/>
+        <exec executable="svn" failonerror="true" dir="${svn.wc.dir}">
+            <arg value="commit"/>
+            <arg value="-m"/>
+            <arg value="[Ant Build] Added/Updated JUnit test reports for ${project.name}"/>
+            <arg path="${svn.wc.reports.path}"/>
+        </exec>
+
+        <echo message="***** SVN REPORTING COMPLETED *****"/>
+    </target>
+
+</project>
