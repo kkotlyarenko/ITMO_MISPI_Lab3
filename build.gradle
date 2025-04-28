@@ -1,0 +1,331 @@
+// build.gradle
+import org.xml.sax.helpers.DefaultHandler
+import javax.xml.parsers.SAXParserFactory
+import org.xml.sax.SAXParseException
+
+plugins {
+    id 'java'
+    id 'war'
+    id 'base'
+}
+
+group = 'org.kkotlyarenko'
+version = projectVersion
+description = projectName
+
+java {
+    sourceCompatibility = JavaVersion.toVersion(javaVersion)
+    targetCompatibility = JavaVersion.toVersion(javaVersion)
+}
+
+sourceSets {
+    main {
+        java { srcDirs = ['src/main/java'] }
+        resources { srcDirs = ['src/main/resources'] }
+    }
+    test {
+        java { srcDirs = ['src/test/java'] }
+        resources { srcDirs = ['src/test/resources'] }
+    }
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = projectEncoding
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'jakarta.enterprise:jakarta.enterprise.cdi-api:4.1.0'
+    compileOnly 'jakarta.faces:jakarta.faces-api:4.1.0'
+    compileOnly 'jakarta.servlet:jakarta.servlet-api:6.1.0'
+
+    implementation 'org.postgresql:postgresql:42.7.4'
+    implementation 'org.primefaces:primefaces:13.0.0:jakarta'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.0-M2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.0-M2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-console-standalone:1.11.0-M2'
+}
+
+
+clean {
+    delete file(distDir)
+    delete file(reportDir)
+    logger.lifecycle '***** CLEAN COMPLETED *****'
+}
+
+war {
+    archiveBaseName = projectName
+    archiveVersion = project.version
+    destinationDirectory = file(distDir)
+
+    manifest {
+        attributes(
+                'Implementation-Version': project.version,
+                'Implementation-Title': projectName,
+                'Main-Class': mainClassName,
+                'Built-By': System.getProperty('user.name')
+        )
+    }
+
+    doFirst {
+        logger.lifecycle '***** BUILD WAR *****'
+    }
+}
+
+tasks.register('buildTask') {
+    dependsOn war
+    description = "Alias for the 'war' task to match Ant target name 'build'."
+}
+tasks.named('build') {
+    dependsOn war
+}
+
+test {
+    useJUnitPlatform()
+
+    reports {
+        junitXml.required = true
+        junitXml.outputLocation = file(reportDir)
+        html.required = false
+    }
+
+    doFirst {
+        file(reportDir).mkdirs()
+        logger.lifecycle '***** RUN TESTS *****'
+    }
+
+    failFast = false
+
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
+}
+
+tasks.register('xml', DefaultTask) {
+    description = 'Validates XML files (well-formedness check only, like Ant lenient=true)'
+    group = 'verification'
+
+    // --- Define inputs during configuration phase ---
+    def projectDirFile = project.projectDir // OK to access project here
+    def svnRepoExcludePattern = "**/${project.properties['svnRepoDir']}/**" // OK here
+    def svnWcExcludePattern = "**/${project.properties['svnWcDir']}/**"   // OK here
+
+    // Declare input files for Gradle's up-to-date checks and to avoid accessing project in doLast
+    inputs.files(
+            project.fileTree(projectDirFile) { // OK here
+                include '**/*.xml'
+                exclude '.idea/**'
+                exclude 'build/**'
+                exclude '.gradle/**'
+                exclude svnRepoExcludePattern
+                exclude svnWcExcludePattern
+            }
+    ).withPathSensitivity(PathSensitivity.RELATIVE)
+    // --- End inputs ---
+
+
+    doFirst {
+        logger.lifecycle '***** VALIDATING XML FILES *****'
+        logger.lifecycle 'XML project files validation...'
+    }
+
+    doLast { // Now avoid accessing 'project' inside this block
+        try {
+            def parserFactory = SAXParserFactory.newInstance()
+            parserFactory.setValidating(false)
+            parserFactory.setNamespaceAware(true)
+            try {
+                parserFactory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+                parserFactory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+                parserFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            } catch (Exception e) {
+                logger.debug("Could not set optional security features on SAXParserFactory: ${e.message}")
+            }
+
+            def parser = parserFactory.newSAXParser()
+            def handler = new DefaultHandler()
+
+            // Iterate over the declared input files
+            inputs.files.each { File xmlFile ->
+                // Use projectDirFile (defined outside doLast) for relativizing path if needed
+                String relativePath = projectDirFile.toPath().relativize(xmlFile.toPath()).toString()
+                logger.info "Checking XML: ${xmlFile.absolutePath}"
+                try {
+                    parser.parse(xmlFile, handler)
+                } catch (SAXParseException e) {
+                    throw new org.gradle.api.tasks.TaskExecutionException(it,
+                            new GradleException("XML well-formedness check failed for ${relativePath}: Line ${e.lineNumber}, Column ${e.columnNumber} -> ${e.message}", e))
+                } catch (Exception e) {
+                    throw new org.gradle.api.tasks.TaskExecutionException(it,
+                            new GradleException("XML check failed for ${relativePath}: ${e.message}", e))
+                }
+            }
+            logger.lifecycle '***** XML VALIDATION COMPLETED SUCCESSFULLY *****'
+        } catch (Exception e) {
+            throw new org.gradle.api.tasks.TaskExecutionException(it,
+                    new GradleException("Failed to setup XML parser: ${e.message}", e))
+        }
+    }
+}
+
+String getSvnExecutable(String command) {
+    return command
+}
+
+def svnRepoDirFile = file(svnRepoDir)
+def svnWcDirFile = file(svnWcDir)
+
+tasks.register('initSvnRepo') {
+    description = 'Creates the local SVN repository if it does not exist'
+    onlyIf { !svnRepoDirFile.exists() }
+    doLast {
+        logger.lifecycle "Local SVN repository directory '${svnRepoDirFile.name}' (at '${svnRepoDirFile.absolutePath}') not found. Creating..."
+        svnRepoDirFile.parentFile.mkdirs()
+        def standardOutput = new ByteArrayOutputStream()
+        def errorOutput = new ByteArrayOutputStream()
+        def result = project.exec { // OK to access project here for exec
+            executable = getSvnExecutable('svnadmin')
+            args = ['create', svnRepoDirFile.absolutePath]
+            standardOutput = standardOutput
+            errorOutput = errorOutput
+            ignoreExitValue = true
+        }
+        if (standardOutput.size() > 0) logger.lifecycle(standardOutput.toString().trim())
+        if (errorOutput.size() > 0) logger.error(errorOutput.toString().trim())
+        if (result.exitValue != 0) {
+            throw new org.gradle.api.GradleException("SVN admin create failed with exit code ${result.exitValue}")
+        }
+        logger.lifecycle "Local SVN repository created at '${svnRepoDirFile.absolutePath}'."
+    }
+}
+
+tasks.register('initSvnWc') {
+    dependsOn initSvnRepo
+    description = 'Checks out or updates the SVN working copy'
+
+    onlyIf { !file("${svnWcDirFile}/.svn").exists() }
+
+    doLast {
+        logger.lifecycle "SVN working copy '${svnWcDirFile.name}' is not valid or does not exist. Checking out..."
+
+        def repoPath = svnRepoDirFile.absolutePath.replace('\\', '/')
+        def repoUrl = "file:///${repoPath}"
+        logger.info "Using SVN Repo URL: ${repoUrl}"
+
+        project.delete(svnWcDirFile)
+        svnWcDirFile.mkdirs()
+        def standardOutput = new ByteArrayOutputStream()
+        def errorOutput = new ByteArrayOutputStream()
+        def result = project.exec { // OK to access project here for exec
+            executable = getSvnExecutable('svn')
+            args = ['checkout', repoUrl, svnWcDirFile.absolutePath]
+            standardOutput = standardOutput
+            errorOutput = errorOutput
+            ignoreExitValue = true
+        }
+        if (standardOutput.size() > 0) logger.lifecycle(standardOutput.toString().trim())
+        if (errorOutput.size() > 0) logger.error(errorOutput.toString().trim())
+        if (result.exitValue != 0) {
+            throw new org.gradle.api.GradleException("SVN checkout failed with exit code ${result.exitValue}")
+        }
+        logger.lifecycle "SVN working copy checked out to '${svnWcDirFile.absolutePath}'."
+    }
+}
+
+tasks.register('reportTask', Copy) {
+    dependsOn test, initSvnWc
+    description = 'Copies reports to SVN WC, adds and commits'
+
+    def svnWcReportsPath = file("${svnWcDir}/${svnReportsSubdir}")
+    def reportDirFile = file(reportDir)
+
+    from(reportDirFile) {
+        include '**/*.xml'
+    }
+    into svnWcReportsPath
+
+    doFirst {
+        logger.lifecycle '***** SVN REPORTING STARTED *****'
+        logger.lifecycle "Copying reports from '${reportDirFile}' to '${svnWcReportsPath}'..."
+        svnWcReportsPath.mkdirs()
+    }
+
+    doLast {
+        logger.lifecycle "Adding report files in '${svnWcReportsPath}' to SVN..."
+        def addStdOut = new ByteArrayOutputStream()
+        def addErrOut = new ByteArrayOutputStream()
+        def addResult = project.exec { // OK here
+            workingDir = svnWcDirFile
+            executable = getSvnExecutable('svn')
+            args = ['add', '--force', '--parents', svnWcReportsPath.absolutePath]
+            standardOutput = addStdOut
+            errorOutput = addErrOut
+            ignoreExitValue = true
+        }
+        if (addStdOut.size() > 0) logger.lifecycle(addStdOut.toString().trim())
+        if (addErrOut.size() > 0) logger.error(addErrOut.toString().trim())
+        if (addResult.exitValue != 0) {
+            throw new org.gradle.api.GradleException("SVN add failed with exit code ${addResult.exitValue}")
+        }
+
+
+        logger.lifecycle "Committing changes in '${svnWcReportsPath}' to SVN..."
+        def commitStdOut = new ByteArrayOutputStream()
+        def commitErrOut = new ByteArrayOutputStream()
+        def commitResult = project.exec { // OK here
+            workingDir = svnWcDirFile
+            executable = getSvnExecutable('svn')
+            // Read projectName from properties (accessed during configuration is OK)
+            def currentProjectName = project.properties['projectName']
+            args = ['commit', '-m', "[Gradle Build] Added/Updated JUnit test reports for ${currentProjectName}", svnWcReportsPath.absolutePath]
+            standardOutput = commitStdOut
+            errorOutput = commitErrOut
+            ignoreExitValue = true
+        }
+        def stdOutStr = commitStdOut.toString().trim()
+        def errOutStr = commitErrOut.toString().trim()
+        if (stdOutStr.size() > 0) logger.lifecycle(stdOutStr)
+        if (errOutStr.size() > 0 && !errOutStr.contains("svn: E155011") && !errOutStr.contains("nothing to commit")) {
+            logger.error(errOutStr)
+        } else if (errOutStr.size() > 0) {
+            logger.warn(errOutStr)
+        }
+        if (commitResult.exitValue != 0 && !errOutStr.contains("nothing to commit")) {
+            throw new org.gradle.api.GradleException("SVN commit failed with exit code ${commitResult.exitValue}")
+        }
+
+        logger.lifecycle '***** SVN REPORTING COMPLETED *****'
+    }
+}
+tasks.register('report') {
+    dependsOn reportTask
+    description = "Alias for 'reportTask'."
+}
+
+tasks.register('cleanSvn', Delete) {
+    description = 'Removes local SVN repository and working copy'
+    delete svnRepoDirFile, svnWcDirFile
+    doFirst {
+        logger.lifecycle '***** CLEANING SVN ARTIFACTS *****'
+        logger.lifecycle "Deleting SVN working copy directory: ${svnWcDirFile}"
+        logger.lifecycle "Deleting local SVN repository directory: ${svnRepoDirFile}"
+    }
+    doLast {
+        logger.lifecycle '***** SVN CLEANUP COMPLETED *****'
+    }
+}
+
+tasks.register('cleanAll') {
+    dependsOn clean, cleanSvn
+    description = 'Runs clean and cleanSvn tasks'
+    doFirst {
+        logger.lifecycle '***** CLEAN ALL STARTED *****'
+    }
+    doLast {
+        logger.lifecycle '***** CLEAN ALL COMPLETED *****'
+    }
+}
